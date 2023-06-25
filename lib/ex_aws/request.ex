@@ -17,13 +17,20 @@ defmodule ExAws.Request do
         _ -> config[:json_codec].encode!(data)
       end
 
-    request_and_retry(http_method, url, service, config, headers, body, {:attempt, 1})
+    {:ok, result} = generate_request(http_method, url, service, config, headers, body)
+
+    request_and_retry(
+      http_method,
+      result.url,
+      service,
+      config,
+      result.headers,
+      body,
+      {:attempt, 1}
+    )
   end
 
-  def request_and_retry(_method, _url, _service, _config, _headers, _req_body, {:error, reason}),
-    do: {:error, reason}
-
-  def request_and_retry(method, url, service, config, headers, req_body, {:attempt, attempt}) do
+  def generate_request(method, url, service, config, headers, req_body) do
     full_headers = ExAws.Auth.headers(method, url, service, config, headers, req_body)
 
     with {:ok, full_headers} <- full_headers do
@@ -31,64 +38,71 @@ defmodule ExAws.Request do
 
       if config[:debug_requests] do
         Logger.debug(
-          "ExAws: Request URL: #{inspect(safe_url)} HEADERS: #{inspect(full_headers)} BODY: #{inspect(req_body)} ATTEMPT: #{attempt}"
+          "ExAws: Request URL: #{inspect(safe_url)} HEADERS: #{inspect(full_headers)} BODY: #{inspect(req_body)}"
         )
       end
 
-      case do_request(config, method, safe_url, req_body, full_headers, attempt, service) do
-        {:ok, %{status_code: status} = resp} when status in 200..299 or status == 304 ->
-          {:ok, resp}
+      {:ok, %{url: safe_url, headers: full_headers}}
+    end
+  end
 
-        {:ok, %{status_code: status} = _resp} when status == 301 ->
-          Logger.warn("ExAws: Received redirect, did you specify the correct region?")
-          {:error, {:http_error, status, "redirected"}}
+  def request_and_retry(_method, _url, _service, _config, _headers, _req_body, {:error, reason}),
+    do: {:error, reason}
 
-        {:ok, %{status_code: status} = resp} when status in 400..499 ->
-          case client_error(resp, config[:json_codec]) do
-            {:retry, reason} ->
-              request_and_retry(
-                method,
-                url,
-                service,
-                config,
-                headers,
-                req_body,
-                attempt_again?(attempt, reason, config)
-              )
+  def request_and_retry(method, url, service, config, headers, req_body, {:attempt, attempt}) do
+    case do_request(config, method, url, req_body, headers, attempt, service) do
+      {:ok, %{status_code: status} = resp} when status in 200..299 or status == 304 ->
+        {:ok, resp}
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+      {:ok, %{status_code: status} = _resp} when status == 301 ->
+        Logger.warn("ExAws: Received redirect, did you specify the correct region?")
+        {:error, {:http_error, status, "redirected"}}
 
-        {:ok, %{status_code: status} = resp} when status >= 500 ->
-          body = Map.get(resp, :body)
-          reason = {:http_error, status, body}
+      {:ok, %{status_code: status} = resp} when status in 400..499 ->
+        case client_error(resp, config[:json_codec]) do
+          {:retry, reason} ->
+            request_and_retry(
+              method,
+              url,
+              service,
+              config,
+              headers,
+              req_body,
+              attempt_again?(attempt, reason, config)
+            )
 
-          request_and_retry(
-            method,
-            url,
-            service,
-            config,
-            headers,
-            req_body,
-            attempt_again?(attempt, reason, config)
-          )
+          {:error, reason} ->
+            {:error, reason}
+        end
 
-        {:error, %{reason: reason}} ->
-          Logger.warn(
-            "ExAws: HTTP ERROR: #{inspect(reason)} for URL: #{inspect(safe_url)} ATTEMPT: #{attempt}"
-          )
+      {:ok, %{status_code: status} = resp} when status >= 500 ->
+        body = Map.get(resp, :body)
+        reason = {:http_error, status, body}
 
-          request_and_retry(
-            method,
-            url,
-            service,
-            config,
-            headers,
-            req_body,
-            attempt_again?(attempt, reason, config)
-          )
-      end
+        request_and_retry(
+          method,
+          url,
+          service,
+          config,
+          headers,
+          req_body,
+          attempt_again?(attempt, reason, config)
+        )
+
+      {:error, %{reason: reason}} ->
+        Logger.warn(
+          "ExAws: HTTP ERROR: #{inspect(reason)} for URL: #{inspect(url)} ATTEMPT: #{attempt}"
+        )
+
+        request_and_retry(
+          method,
+          url,
+          service,
+          config,
+          headers,
+          req_body,
+          attempt_again?(attempt, reason, config)
+        )
     end
   end
 
